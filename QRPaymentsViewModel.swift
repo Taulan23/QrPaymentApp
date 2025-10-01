@@ -316,7 +316,9 @@ class QRPaymentsViewModel: ObservableObject {
         }
         
         // Проверяем кэш для оптимизации
-        let cacheKey = "\(rmbAmount)_\(rubAmount)_\(currentQRFormat)"
+        // Ключ кэша теперь включает номер договора для правильной работы
+        let contractKey = contractNumberEnabled ? "contract_\(contractNumber)" : "no_contract"
+        let cacheKey = "\(rmbAmount)_\(rubAmount)_\(currentQRFormat)_\(contractKey)"
         if let cachedImage = qrCodeCache[cacheKey] {
             cacheHits += 1
             // Обновляем порядок доступа (LRU)
@@ -503,7 +505,8 @@ class QRPaymentsViewModel: ObservableObject {
                             bottomText: bottomText
                         ) { image in
                             if let image = image, self.qrCodeCache.count < self.maxCacheSize {
-                                let cacheKey = "\(amount)_\(rubAmount)_\(self.currentQRFormat)"
+                                // В предзагрузке используем без договора
+                                let cacheKey = "\(amount)_\(rubAmount)_\(self.currentQRFormat)_no_contract"
                                 self.qrCodeCache[cacheKey] = image
                                 self.cacheAccessOrder.append(cacheKey)
                                 
