@@ -104,6 +104,16 @@ class QRPaymentsViewModel: ObservableObject {
             }
             .store(in: &cancellables)
         
+        // Отслеживаем изменения номера договора и его состояния
+        Publishers.CombineLatest($contractNumberEnabled, $contractNumber)
+            .dropFirst()
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .sink { [weak self] _, _ in
+                // При изменении договора сразу обновляем назначение платежа
+                self?.updatePaymentPurpose()
+            }
+            .store(in: &cancellables)
+        
         // Автоматическое обновление при изменении данных
         // Увеличиваем debounce для лучшей производительности
         Publishers.CombineLatest4($exchangeRate, $rmbAmount, $rubAmount, $contractNumberEnabled)
@@ -268,6 +278,19 @@ class QRPaymentsViewModel: ObservableObject {
     private func updateQRCodeDisplay(rmbAmount: Double, rubAmount: Double) {
         DispatchQueue.main.async {
             self.qrDisplayText = "\(String(format: "%.2f", rmbAmount)) rmb / \(String(format: "%.2f", rubAmount)) руб."
+        }
+    }
+    
+    private func updatePaymentPurpose() {
+        // Обновляем назначение платежа при изменении номера договора
+        guard let rmbAmount = rmbAmount, rmbAmount > 0 else { return }
+        
+        let purpose = contractNumberEnabled 
+            ? "Оплата по договору \(contractNumber). Услуга оплаты товара \(formatNumber(rmbAmount)) RMB"
+            : "Услуга оплаты товара \(formatNumber(rmbAmount)) RMB"
+        
+        DispatchQueue.main.async { [weak self] in
+            self?.paymentPurpose = purpose
         }
     }
     
