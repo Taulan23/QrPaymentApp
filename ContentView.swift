@@ -172,6 +172,35 @@ struct ContentView: View {
                                 .padding(.horizontal)
                         }
                         
+                        // Назначение платежа (с номером договора)
+                        if let purpose = viewModel.paymentPurpose {
+                            VStack(spacing: 4) {
+                                HStack {
+                                    Image(systemName: "doc.text")
+                                        .foregroundColor(.blue)
+                                        .font(.caption)
+                                    Text("Назначение платежа:")
+                                        .font(.caption)
+                                        .fontWeight(.semibold)
+                                        .foregroundColor(.primary)
+                                    Spacer()
+                                }
+                                
+                                Text(purpose)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .multilineTextAlignment(.leading)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .padding(12)
+                            .background(Color.blue.opacity(0.05))
+                            .cornerRadius(8)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color.blue.opacity(0.2), lineWidth: 1)
+                            )
+                        }
+                        
                         // Переключатель формата
                         VStack(spacing: 8) {
                             Button(action: {

@@ -19,6 +19,7 @@ class QRPaymentsViewModel: ObservableObject {
     @Published var contractNumber: String = "22"
     @Published var qrCodeImage: UIImage? = nil
     @Published var qrDisplayText: String? = nil
+    @Published var paymentPurpose: String? = nil
     @Published var currentQRFormat: QRFormat = .spb
     
     // MARK: - Private Properties
@@ -238,6 +239,11 @@ class QRPaymentsViewModel: ObservableObject {
             ? "Оплата по договору \(contractNumber). Услуга оплаты товара \(formatNumber(rmbAmount)) RMB"
             : "Услуга оплаты товара \(formatNumber(rmbAmount)) RMB"
         
+        // Сохраняем назначение платежа для отображения
+        DispatchQueue.main.async { [weak self] in
+            self?.paymentPurpose = purpose
+        }
+        
         switch currentQRFormat {
         case .spb:
             return spbQRFormat.buildSPBQrCode(
@@ -289,6 +295,7 @@ class QRPaymentsViewModel: ObservableObject {
         DispatchQueue.main.async {
             self.qrCodeImage = nil
             self.qrDisplayText = "Введите корректные данные"
+            self.paymentPurpose = nil
         }
     }
     
