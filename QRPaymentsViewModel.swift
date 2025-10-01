@@ -27,8 +27,10 @@ class QRPaymentsViewModel: ObservableObject {
     private let currencyCalculator = CurrencyCalculator()
     private let spbQRFormat = SPBQRFormat()
     
-    // Кэш для QR кодов для улучшения производительности (бесконечный размер)
+    // Кэш для QR кодов для улучшения производительности (максимум 50 элементов)
     private var qrCodeCache: [String: UIImage] = [:]
+    private var cacheAccessOrder: [String] = [] // Для LRU кэша
+    private let maxCacheSize = 50 // Максимальное количество элементов в кэше
     
     // Статистика кэша для мониторинга
     private var cacheHits: Int = 0
@@ -40,6 +42,10 @@ class QRPaymentsViewModel: ObservableObject {
     
     // Флаг для предотвращения повторных сохранений
     @Published var isSaving = false
+    
+    // Отслеживание последнего измененного поля для правильных расчетов
+    private var lastEditedField: EditedField = .none
+    private var isUpdatingProgrammatically = false
     
     // Банковские реквизиты (обновлены согласно PDF)
     private let bankName = "ИНДИВИДУАЛЬНЫЙ ПРЕДПРИНИМАТЕЛЬ КОНОНЕНКО РОБЕРТ АЛЕКСАНДРОВИЧ"
@@ -71,10 +77,38 @@ class QRPaymentsViewModel: ObservableObject {
     
     // MARK: - Private Methods
     private func setupBindings() {
+        // Отслеживаем изменения курса валют
+        $exchangeRate
+            .dropFirst()
+            .sink { [weak self] _ in
+                guard let self = self, !self.isUpdatingProgrammatically else { return }
+                self.lastEditedField = .exchangeRate
+            }
+            .store(in: &cancellables)
+        
+        // Отслеживаем изменения RMB
+        $rmbAmount
+            .dropFirst()
+            .sink { [weak self] _ in
+                guard let self = self, !self.isUpdatingProgrammatically else { return }
+                self.lastEditedField = .rmbAmount
+            }
+            .store(in: &cancellables)
+        
+        // Отслеживаем изменения рублей
+        $rubAmount
+            .dropFirst()
+            .sink { [weak self] _ in
+                guard let self = self, !self.isUpdatingProgrammatically else { return }
+                self.lastEditedField = .rubAmount
+            }
+            .store(in: &cancellables)
+        
         // Автоматическое обновление при изменении данных
+        // Увеличиваем debounce для лучшей производительности
         Publishers.CombineLatest4($exchangeRate, $rmbAmount, $rubAmount, $contractNumberEnabled)
             .combineLatest($contractNumber)
-            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .debounce(for: .milliseconds(800), scheduler: RunLoop.main)
             .sink { [weak self] _ in
                 self?.calculateAndUpdateQR()
             }
@@ -85,32 +119,115 @@ class QRPaymentsViewModel: ObservableObject {
     
     // MARK: - Public Methods
     func calculateAndUpdateQR() {
-        guard let exchangeRate = exchangeRate,
-              let rmbAmount = rmbAmount,
-              exchangeRate > 0,
-              rmbAmount > 0 else {
+        // Логика расчетов в зависимости от того, какое поле пользователь редактировал
+        var finalExchangeRate: Double?
+        var finalRmbAmount: Double?
+        var finalRubAmount: Double?
+        
+        switch lastEditedField {
+        case .none:
+            // Первый запуск или все поля пустые
+            if let rate = exchangeRate, let rmb = rmbAmount, rate > 0, rmb > 0 {
+                finalExchangeRate = rate
+                finalRmbAmount = rmb
+                finalRubAmount = rmb * rate
+            } else {
+                clearQRCode()
+                return
+            }
+            
+        case .exchangeRate:
+            // Изменился курс - пересчитываем рубли на основе RMB
+            guard let rate = exchangeRate, rate > 0 else {
+                clearQRCode()
+                return
+            }
+            
+            if let rmb = rmbAmount, rmb > 0 {
+                finalExchangeRate = rate
+                finalRmbAmount = rmb
+                finalRubAmount = rmb * rate
+            } else if let rub = rubAmount, rub > 0 {
+                // Если есть только рубли, пересчитываем RMB
+                finalExchangeRate = rate
+                finalRubAmount = rub
+                finalRmbAmount = rub / rate
+            } else {
+                clearQRCode()
+                return
+            }
+            
+        case .rmbAmount:
+            // Изменилось количество RMB - пересчитываем рубли
+            guard let rmb = rmbAmount, rmb > 0 else {
+                clearQRCode()
+                return
+            }
+            
+            if let rate = exchangeRate, rate > 0 {
+                finalExchangeRate = rate
+                finalRmbAmount = rmb
+                finalRubAmount = rmb * rate
+            } else if let rub = rubAmount, rub > 0 {
+                // Если есть рубли, пересчитываем курс
+                finalRmbAmount = rmb
+                finalRubAmount = rub
+                finalExchangeRate = rub / rmb
+            } else {
+                clearQRCode()
+                return
+            }
+            
+        case .rubAmount:
+            // Изменилась сумма в рублях - пересчитываем RMB
+            guard let rub = rubAmount, rub > 0 else {
+                clearQRCode()
+                return
+            }
+            
+            if let rate = exchangeRate, rate > 0 {
+                finalExchangeRate = rate
+                finalRubAmount = rub
+                finalRmbAmount = rub / rate
+            } else if let rmb = rmbAmount, rmb > 0 {
+                // Если есть RMB, пересчитываем курс
+                finalRmbAmount = rmb
+                finalRubAmount = rub
+                finalExchangeRate = rub / rmb
+            } else {
+                clearQRCode()
+                return
+            }
+        }
+        
+        // Проверяем, что все значения валидны
+        guard let rate = finalExchangeRate, let rmb = finalRmbAmount, let rub = finalRubAmount,
+              rate > 0, rmb > 0, rub > 0,
+              rate.isFinite, rmb.isFinite, rub.isFinite else {
             clearQRCode()
             return
         }
         
-        // Рассчитываем сумму в рублях
-        let calculatedRubAmount = rmbAmount * exchangeRate
+        // Обновляем поля программно (чтобы не триггерить повторный расчет)
+        isUpdatingProgrammatically = true
         
-        // Обновляем поле суммы в рублях только если оно пустое
-        if rubAmount == nil {
-            DispatchQueue.main.async {
-                self.rubAmount = calculatedRubAmount
-            }
+        if exchangeRate != rate {
+            exchangeRate = rate
+        }
+        if rmbAmount != rmb {
+            rmbAmount = rmb
+        }
+        if rubAmount != rub {
+            rubAmount = rub
         }
         
-        // Используем актуальную сумму
-        let finalRubAmount = rubAmount ?? calculatedRubAmount
+        isUpdatingProgrammatically = false
         
         // Обновляем отображение
-        updateQRCodeDisplay(rmbAmount: rmbAmount, rubAmount: finalRubAmount)
+        updateQRCodeDisplay(rmbAmount: rmb, rubAmount: rub)
         
         // Генерируем QR-код
-        generateQRCodeForAmount(rmbAmount: rmbAmount, rubAmount: finalRubAmount)
+        generateQRCodeForAmount(rmbAmount: rmb, rubAmount: rub)
     }
     
     func calculateAndUpdateQRFromRub() {
@@ -179,6 +296,11 @@ class QRPaymentsViewModel: ObservableObject {
         let cacheKey = "\(rmbAmount)_\(rubAmount)_\(currentQRFormat)"
         if let cachedImage = qrCodeCache[cacheKey] {
             cacheHits += 1
+            // Обновляем порядок доступа (LRU)
+            if let index = cacheAccessOrder.firstIndex(of: cacheKey) {
+                cacheAccessOrder.remove(at: index)
+            }
+            cacheAccessOrder.append(cacheKey)
             print("🎯 Кэш попадание! Всего попаданий: \(cacheHits), промахов: \(cacheMisses)")
             DispatchQueue.main.async { [weak self] in
                 self?.qrCodeImage = cachedImage
@@ -193,8 +315,8 @@ class QRPaymentsViewModel: ObservableObject {
         // Устанавливаем флаг генерации
         isGeneratingQR = true
         
-        // Генерируем QR код в фоновом потоке
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        // Генерируем QR код в фоновом потоке с более низким приоритетом для экономии ресурсов
+        DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
             
             // Создаем тексты для отображения на QR-коде
@@ -213,14 +335,25 @@ class QRPaymentsViewModel: ObservableObject {
                     self.isGeneratingQR = false
                     
                     if let image = image {
+                        // Применяем LRU политику: удаляем самый старый элемент, если кэш переполнен
+                        if self.qrCodeCache.count >= self.maxCacheSize, let oldestKey = self.cacheAccessOrder.first {
+                            if let oldImage = self.qrCodeCache.removeValue(forKey: oldestKey) {
+                                let oldSize = Int(oldImage.size.width * oldImage.size.height * 4)
+                                self.totalCacheSize -= oldSize
+                            }
+                            self.cacheAccessOrder.removeFirst()
+                            print("🗑️ Удален старый элемент из кэша (LRU)")
+                        }
+                        
                         // Сохраняем в кэш только если изображение валидно
                         self.qrCodeCache[cacheKey] = image
+                        self.cacheAccessOrder.append(cacheKey)
                         
                         // Обновляем статистику размера кэша
                         let imageSize = Int(image.size.width * image.size.height * 4) // Примерный размер в байтах
                         self.totalCacheSize += imageSize
                         
-                        print("💾 QR-код сохранен в кэш. Размер кэша: \(self.qrCodeCache.count) элементов, ~\(self.totalCacheSize / 1024) KB")
+                        print("💾 QR-код сохранен в кэш. Размер кэша: \(self.qrCodeCache.count)/\(self.maxCacheSize) элементов, ~\(self.totalCacheSize / 1024) KB")
                         
                         self.qrCodeImage = image
                         self.qrDisplayText = qrText
@@ -306,6 +439,7 @@ class QRPaymentsViewModel: ObservableObject {
     
     func clearCache() {
         qrCodeCache.removeAll()
+        cacheAccessOrder.removeAll()
         cacheHits = 0
         cacheMisses = 0
         totalCacheSize = 0
@@ -313,21 +447,30 @@ class QRPaymentsViewModel: ObservableObject {
     }
     
     func preloadCommonQRCodes() {
-        // Предзагрузка популярных комбинаций для ускорения работы
-        let commonRates = [11.0, 11.5, 12.0, 12.25, 12.5, 13.0]
-        let commonAmounts = [100.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0]
+        // ОТКЛЮЧЕНО: Предзагрузка создавала проблемы производительности
+        // Кэш будет заполняться автоматически при использовании
+        print("ℹ️ Предзагрузка QR-кодов отключена для лучшей производительности")
         
-        print("🚀 Начинаем предзагрузку популярных QR-кодов...")
+        // Если нужна легкая предзагрузка, раскомментируйте код ниже
+        /*
+        // Предзагрузка только самых популярных комбинаций (уменьшено с 36 до 6)
+        let commonRates = [12.0, 12.5]
+        let commonAmounts = [1000.0, 2000.0, 5000.0]
         
-        DispatchQueue.global(qos: .background).async { [weak self] in
+        print("🚀 Начинаем легкую предзагрузку популярных QR-кодов...")
+        
+        DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
+            
+            // Добавляем задержку, чтобы не блокировать UI при запуске
+            Thread.sleep(forTimeInterval: 3.0)
             
             for rate in commonRates {
                 for amount in commonAmounts {
                     let rubAmount = amount * rate
                     let qrText = self.buildQRCodeText(rmbAmount: amount, rubAmount: rubAmount)
                     
-                    if !qrText.isEmpty {
+                    if !qrText.isEmpty && self.qrCodeCache.count < self.maxCacheSize {
                         let topText = "\(String(format: "%.0f", amount)) rmb / \(String(format: "%.0f", rubAmount)) руб."
                         let bottomText = "Курс: \(String(format: "%.2f", rate))"
                         
@@ -336,14 +479,18 @@ class QRPaymentsViewModel: ObservableObject {
                             topText: topText,
                             bottomText: bottomText
                         ) { image in
-                            if let image = image {
+                            if let image = image, self.qrCodeCache.count < self.maxCacheSize {
                                 let cacheKey = "\(amount)_\(rubAmount)_\(self.currentQRFormat)"
                                 self.qrCodeCache[cacheKey] = image
+                                self.cacheAccessOrder.append(cacheKey)
                                 
                                 let imageSize = Int(image.size.width * image.size.height * 4)
                                 self.totalCacheSize += imageSize
                             }
                         }
+                        
+                        // Пауза между генерациями для снижения нагрузки
+                        Thread.sleep(forTimeInterval: 0.1)
                     }
                 }
             }
@@ -352,6 +499,7 @@ class QRPaymentsViewModel: ObservableObject {
                 print("✅ Предзагрузка завершена. Кэш содержит \(self.qrCodeCache.count) элементов")
             }
         }
+        */
     }
     
     func saveQRCode() {
@@ -527,4 +675,12 @@ enum QRFormat: CaseIterable {
         let nextIndex = (currentIndex + 1) % allCases.count
         return allCases[nextIndex]
     }
+}
+
+// MARK: - Edited Field Enum
+enum EditedField {
+    case none
+    case exchangeRate
+    case rmbAmount
+    case rubAmount
 }

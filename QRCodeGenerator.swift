@@ -10,8 +10,16 @@ import CoreImage
 
 class QRCodeGenerator {
     
+    // Переиспользуемый контекст для оптимизации
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    
     func generateQRCode(from string: String, completion: @escaping (UIImage?) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else {
+                DispatchQueue.main.async { completion(nil) }
+                return
+            }
+            
             let data = string.data(using: .utf8)
             
             guard let filter = CIFilter(name: "CIQRCodeGenerator") else {
@@ -22,7 +30,7 @@ class QRCodeGenerator {
             }
             
             filter.setValue(data, forKey: "inputMessage")
-            filter.setValue("H", forKey: "inputCorrectionLevel") // Высокий уровень коррекции ошибок
+            filter.setValue("M", forKey: "inputCorrectionLevel") // Средний уровень коррекции (было H)
             
             guard let outputImage = filter.outputImage else {
                 DispatchQueue.main.async {
@@ -36,9 +44,8 @@ class QRCodeGenerator {
             let transform = CGAffineTransform(scaleX: scale, y: scale)
             let scaledImage = outputImage.transformed(by: transform)
             
-            // Конвертируем в UIImage
-            let context = CIContext()
-            guard let cgImage = context.createCGImage(scaledImage, from: scaledImage.extent) else {
+            // Конвертируем в UIImage с переиспользуемым контекстом
+            guard let cgImage = self.ciContext.createCGImage(scaledImage, from: scaledImage.extent) else {
                 DispatchQueue.main.async {
                     completion(nil)
                 }
@@ -65,7 +72,7 @@ class QRCodeGenerator {
     }
     
     private func createImageWithText(qrImage: UIImage, topText: String, bottomText: String, completion: @escaping (UIImage?) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .utility).async {
             // Проверяем валидность входных данных
             guard qrImage.size.width > 0 && qrImage.size.height > 0 else {
                 DispatchQueue.main.async {
